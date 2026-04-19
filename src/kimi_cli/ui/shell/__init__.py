@@ -668,6 +668,18 @@ class Shell:
 
         logger.info("Running shell command: {cmd}", cmd=command)
 
+        from kaos import get_current_kaos
+        from kaos.ssh import SSHKaos
+
+        is_remote = isinstance(get_current_kaos(), SSHKaos)
+
+        if is_remote:
+            await self._run_remote_shell_command(command)
+        else:
+            await self._run_local_shell_command(command)
+
+    async def _run_local_shell_command(self, command: str) -> None:
+        """Run a shell command locally in foreground."""
         proc: asyncio.subprocess.Process | None = None
 
         def _handler():
@@ -691,6 +703,41 @@ class Shell:
             console.print(f"[red]Failed to run shell command: {e}[/red]")
         finally:
             remove_sigint()
+
+    async def _run_remote_shell_command(self, command: str) -> None:
+        """Run a shell command on the remote host via SSH in foreground."""
+        import kaos
+        import sys
+
+        proc = await kaos.exec("/bin/bash", "-c", command)
+
+        async def _pipe_stream(stream, writer):
+            while True:
+                data = await stream.read(4096)
+                if not data:
+                    break
+                writer.write(data.decode("utf-8", errors="replace"))
+                writer.flush()
+
+        async def _pipe_stdout():
+            await _pipe_stream(proc.stdout, sys.stdout)
+
+        async def _pipe_stderr():
+            await _pipe_stream(proc.stderr, sys.stderr)
+
+        try:
+            await asyncio.gather(_pipe_stdout(), _pipe_stderr())
+            exitcode = await proc.wait()
+            if exitcode != 0:
+                console.print(f"[red]Exit code: {exitcode}[/red]")
+        except Exception as e:
+            logger.exception("Failed to run remote shell command:")
+            console.print(f"[red]Failed to run remote shell command: {e}[/red]")
+        finally:
+            try:
+                await proc.kill()
+            except Exception:
+                pass
 
     async def _run_slash_command(self, command_call: SlashCommandCall) -> None:
         from kimi_cli.cli import Reload, SwitchToVis, SwitchToWeb
