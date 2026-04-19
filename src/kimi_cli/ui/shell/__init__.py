@@ -715,10 +715,26 @@ class Shell:
 
         runtime = self.soul.runtime if isinstance(self.soul, KimiSoul) else None
         if runtime is not None and runtime.remote_shell is not None:
+            def _stdout_cb(data: bytes):
+                text = data.decode("utf-8", errors="replace")
+                try:
+                    sys.stdout.write(text)
+                    sys.stdout.flush()
+                except OSError:
+                    console.out(text, end="")
+
+            def _stderr_cb(data: bytes):
+                text = data.decode("utf-8", errors="replace")
+                try:
+                    sys.stderr.write(text)
+                    sys.stderr.flush()
+                except OSError:
+                    console.out(text, end="")
+
             exitcode = await runtime.remote_shell.run(
                 command,
-                stdout_cb=lambda data: sys.stdout.write(data.decode("utf-8", errors="replace")) or sys.stdout.flush(),
-                stderr_cb=lambda data: sys.stderr.write(data.decode("utf-8", errors="replace")) or sys.stderr.flush(),
+                stdout_cb=_stdout_cb,
+                stderr_cb=_stderr_cb,
             )
             if exitcode != 0:
                 console.print(f"[red]Exit code: {exitcode}[/red]")
