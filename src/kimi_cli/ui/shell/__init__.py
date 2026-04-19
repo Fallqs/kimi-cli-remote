@@ -723,13 +723,32 @@ class Shell:
                 except OSError:
                     console.out(text, end="")
 
+            import re
+
+            # Strip bash prompt prefix (e.g. "(bsa) skl@ubuntu:~$ ") from stderr
+            # lines so that only genuine command echo / error text remains.
+            _PROMPT_RE = re.compile(r"^(\(.*\)\s+)?\S+@\S+:\S+[\$#>]\s*")
+            _SENTINEL_RE = re.compile(r"__KIMI_DONE__")
+            _stderr_buffer = ""
+
             def _stderr_cb(data: bytes):
+                nonlocal _stderr_buffer
                 text = data.decode("utf-8", errors="replace")
-                try:
-                    sys.stderr.write(text)
-                    sys.stderr.flush()
-                except OSError:
-                    console.out(text, end="")
+                _stderr_buffer += text
+                while "\n" in _stderr_buffer:
+                    line, _stderr_buffer = _stderr_buffer.split("\n", 1)
+                    if line.startswith("bash:"):
+                        continue
+                    if _SENTINEL_RE.search(line):
+                        continue
+                    line = _PROMPT_RE.sub("", line)
+                    if not line:
+                        continue
+                    try:
+                        sys.stderr.write(line + "\n")
+                        sys.stderr.flush()
+                    except OSError:
+                        console.out(line + "\n", end="")
 
             exitcode = await runtime.remote_shell.run(
                 command,
