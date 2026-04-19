@@ -208,6 +208,8 @@ class Runtime:
     role: Literal["root", "subagent"] = "root"
     hook_engine: Any = None
     """HookEngine instance, set by KimiCLI after soul creation."""
+    remote_shell: Any = None
+    """PersistentRemoteShell instance when running over SSH, otherwise None."""
 
     def __post_init__(self) -> None:
         if self.subagent_store is None:
@@ -229,6 +231,9 @@ class Runtime:
         yolo: bool,
         skills_dirs: list[KaosPath] | None = None,
     ) -> Runtime:
+        from kaos import get_current_kaos
+        from kaos.ssh import SSHKaos
+
         ls_output, agents_md, environment = await asyncio.gather(
             list_directory(session.work_dir),
             load_agents_md(session.work_dir),
@@ -308,6 +313,17 @@ class Runtime:
             config.notifications,
         )
 
+        # Start a persistent remote shell when connected via SSH so that
+        # stateful operations (conda activate, cd, export) persist across
+        # separate command invocations.
+        remote_shell = None
+        if isinstance(get_current_kaos(), SSHKaos):
+            from kimi_cli.utils.remote_shell import PersistentRemoteShell
+
+            remote_shell = PersistentRemoteShell(get_current_kaos()._connection)
+            await remote_shell.start()
+            logger.info("Persistent remote shell started")
+
         return Runtime(
             config=config,
             oauth=oauth,
@@ -344,6 +360,7 @@ class Runtime:
             approval_runtime=ApprovalRuntime(),
             root_wire_hub=RootWireHub(),
             role="root",
+            remote_shell=remote_shell,
         )
 
     def copy_for_subagent(
@@ -376,6 +393,7 @@ class Runtime:
             subagent_id=agent_id,
             subagent_type=subagent_type,
             role="subagent",
+            remote_shell=self.remote_shell,
         )
 
 

@@ -709,11 +709,24 @@ class Shell:
 
     async def _run_remote_shell_command(self, command: str) -> None:
         """Run a shell command on the remote host via SSH in foreground."""
-        import kaos
         import sys
 
-        # Track conda environment so that "conda activate" persists across
-        # separate command invocations (each kaos.exec call starts a fresh bash).
+        from kimi_cli.soul.kimisoul import KimiSoul
+
+        runtime = self.soul.runtime if isinstance(self.soul, KimiSoul) else None
+        if runtime is not None and runtime.remote_shell is not None:
+            exitcode = await runtime.remote_shell.run(
+                command,
+                stdout_cb=lambda data: sys.stdout.write(data.decode("utf-8", errors="replace")) or sys.stdout.flush(),
+                stderr_cb=lambda data: sys.stderr.write(data.decode("utf-8", errors="replace")) or sys.stderr.flush(),
+            )
+            if exitcode != 0:
+                console.print(f"[red]Exit code: {exitcode}[/red]")
+            return
+
+        # Fallback to one-shot kaos.exec when no persistent shell is available.
+        import kaos
+
         stripped = command.strip()
         if stripped.startswith("conda activate"):
             parts = stripped.split(None, 2)
@@ -724,8 +737,6 @@ class Shell:
         if self._active_conda_env is not None and not stripped.startswith("conda activate"):
             command = f"conda activate {self._active_conda_env} && {command}"
 
-        # Use interactive bash so that ~/.bashrc is sourced, making tools
-        # like conda available.
         proc = await kaos.exec("/bin/bash", "-i", "-c", command)
 
         _BASH_WARNINGS = (
@@ -750,8 +761,6 @@ class Shell:
                 if not data:
                     break
                 text = data.decode("utf-8", errors="replace")
-                # Filter out bash job-control warnings that appear when -i is
-                # used without a TTY.
                 lines = text.splitlines(keepends=True)
                 filtered = "".join(
                     line for line in lines if not line.startswith(_BASH_WARNINGS)

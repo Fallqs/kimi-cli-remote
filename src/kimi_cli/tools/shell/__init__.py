@@ -228,6 +228,14 @@ class Shell(CallableTool2[Params]):
         stderr_cb: Callable[[bytes], None],
         timeout: int,
     ) -> int:
+        # Use persistent remote shell when available (SSH mode) so that state
+        # such as conda environments, working directory, and env vars survive
+        # across command invocations.
+        if self._runtime.remote_shell is not None:
+            return await self._runtime.remote_shell.run(
+                command, stdout_cb=stdout_cb, stderr_cb=stderr_cb, timeout=timeout
+            )
+
         async def _read_stream(stream: AsyncReadable, cb: Callable[[bytes], None]):
             while True:
                 line = await stream.readline()

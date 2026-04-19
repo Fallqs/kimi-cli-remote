@@ -860,6 +860,14 @@ def kimi(
 
             return session, exit_code
         finally:
+            # Close persistent remote shell before tearing down SSH.
+            if "instance" in locals() and instance is not None:
+                runtime = getattr(instance, "_runtime", None)
+                if runtime is not None and runtime.remote_shell is not None:
+                    try:
+                        await runtime.remote_shell.close()
+                    except Exception:
+                        pass
             if kaos_token is not None:
                 reset_current_kaos(kaos_token)
             if ssh_kaos is not None:
