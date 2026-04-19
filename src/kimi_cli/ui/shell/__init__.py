@@ -709,7 +709,14 @@ class Shell:
         import kaos
         import sys
 
-        proc = await kaos.exec("/bin/bash", "-c", command)
+        # Use interactive bash so that ~/.bashrc is sourced, making tools
+        # like conda available.
+        proc = await kaos.exec("/bin/bash", "-i", "-c", command)
+
+        _BASH_WARNINGS = (
+            "bash: cannot set terminal process group",
+            "bash: no job control in this shell",
+        )
 
         async def _pipe_stream(stream, writer):
             while True:
@@ -723,7 +730,20 @@ class Shell:
             await _pipe_stream(proc.stdout, sys.stdout)
 
         async def _pipe_stderr():
-            await _pipe_stream(proc.stderr, sys.stderr)
+            while True:
+                data = await proc.stderr.read(4096)
+                if not data:
+                    break
+                text = data.decode("utf-8", errors="replace")
+                # Filter out bash job-control warnings that appear when -i is
+                # used without a TTY.
+                lines = text.splitlines(keepends=True)
+                filtered = "".join(
+                    line for line in lines if not line.startswith(_BASH_WARNINGS)
+                )
+                if filtered:
+                    sys.stderr.write(filtered)
+                    sys.stderr.flush()
 
         try:
             await asyncio.gather(_pipe_stdout(), _pipe_stderr())

@@ -103,12 +103,19 @@ class Shell(CallableTool2[Params]):
         if not result:
             return result.rejection_error()
 
+        _BASH_WARNINGS = (
+            "bash: cannot set terminal process group",
+            "bash: no job control in this shell",
+        )
+
         def stdout_cb(line: bytes):
             line_str = line.decode(encoding="utf-8", errors="replace")
             builder.write(line_str)
 
         def stderr_cb(line: bytes):
             line_str = line.decode(encoding="utf-8", errors="replace")
+            if line_str.startswith(_BASH_WARNINGS):
+                return
             builder.write(line_str)
 
         try:
@@ -263,7 +270,10 @@ class Shell(CallableTool2[Params]):
         from kaos.ssh import SSHKaos
 
         if isinstance(get_current_kaos(), SSHKaos):
-            return ("/bin/bash", "-c", command)
+            # Use interactive bash so that ~/.bashrc is sourced, making tools
+            # like conda available.  The job-control warnings that bash emits
+            # when stdin is not a TTY are filtered out in stderr_cb.
+            return ("/bin/bash", "-i", "-c", command)
         if self._is_powershell:
             return (str(self._shell_path), "-command", command)
         return (str(self._shell_path), "-c", command)

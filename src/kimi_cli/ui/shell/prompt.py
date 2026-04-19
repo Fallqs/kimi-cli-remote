@@ -27,6 +27,7 @@ from prompt_toolkit.completion import (
     Completer,
     Completion,
     FuzzyCompleter,
+    PathCompleter,
     WordCompleter,
     merge_completers,
 )
@@ -1230,7 +1231,22 @@ class CustomPromptSession:
             ],
             deduplicate=True,
         )
-        self._shell_mode_completer = SlashCommandCompleter(shell_mode_slash_commands)
+        from kaos import get_current_kaos
+        from kaos.ssh import SSHKaos
+
+        if isinstance(get_current_kaos(), SSHKaos):
+            # Remote shell mode: only slash-command completion is available.
+            # Path completion would resolve against the local filesystem,
+            # which is misleading when the target host is remote.
+            self._shell_mode_completer = SlashCommandCompleter(shell_mode_slash_commands)
+        else:
+            self._shell_mode_completer = merge_completers(
+                [
+                    SlashCommandCompleter(shell_mode_slash_commands),
+                    PathCompleter(),
+                ],
+                deduplicate=True,
+            )
 
         # Build key bindings
         _kb = KeyBindings()
