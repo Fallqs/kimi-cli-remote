@@ -232,8 +232,12 @@ class Shell(CallableTool2[Params]):
         # such as conda environments, working directory, and env vars survive
         # across command invocations.
         if self._runtime.remote_shell is not None:
+            # Suppress stderr from the persistent shell because bash echoes
+            # prompts and command input to stderr, which pollutes the output
+            # seen by the LLM.  Actual command errors are still reflected in
+            # the exit code.
             return await self._runtime.remote_shell.run(
-                command, stdout_cb=stdout_cb, stderr_cb=stderr_cb, timeout=timeout
+                command, stdout_cb=stdout_cb, stderr_cb=None, timeout=timeout
             )
 
         async def _read_stream(stream: AsyncReadable, cb: Callable[[bytes], None]):
