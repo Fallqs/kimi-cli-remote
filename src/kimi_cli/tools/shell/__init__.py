@@ -61,16 +61,22 @@ class Shell(CallableTool2[Params]):
     params: type[Params] = Params
 
     def __init__(self, approval: Approval, environment: Environment, runtime: Runtime):
-        is_powershell = environment.shell_name == "Windows PowerShell"
+        from kaos import get_current_kaos
+        from kaos.ssh import SSHKaos
+
+        is_ssh = isinstance(get_current_kaos(), SSHKaos)
+        is_powershell = environment.shell_name == "Windows PowerShell" and not is_ssh
+        shell_name = "bash" if is_ssh else environment.shell_name
+        shell_path = "/bin/bash" if is_ssh else environment.shell_path
         super().__init__(
             description=load_desc(
                 Path(__file__).parent / ("powershell.md" if is_powershell else "bash.md"),
-                {"SHELL": f"{environment.shell_name} (`{environment.shell_path}`)"},
+                {"SHELL": f"{shell_name} (`{shell_path}`)"},
             )
         )
         self._approval = approval
         self._is_powershell = is_powershell
-        self._shell_path = environment.shell_path
+        self._shell_path = shell_path
         self._runtime = runtime
 
     @override
@@ -227,7 +233,14 @@ class Shell(CallableTool2[Params]):
 
         # Close stdin immediately so interactive prompts (e.g. git password) get
         # EOF instead of hanging forever waiting for input that will never come.
-        process.stdin.close()
+        from kaos import get_current_kaos
+        from kaos.ssh import SSHKaos
+
+        if isinstance(get_current_kaos(), SSHKaos):
+            if hasattr(process.stdin, "write_eof"):
+                process.stdin.write_eof()
+        else:
+            process.stdin.close()
 
         try:
             await asyncio.wait_for(
@@ -246,6 +259,11 @@ class Shell(CallableTool2[Params]):
             raise
 
     def _shell_args(self, command: str) -> tuple[str, ...]:
+        from kaos import get_current_kaos
+        from kaos.ssh import SSHKaos
+
+        if isinstance(get_current_kaos(), SSHKaos):
+            return ("/bin/bash", "-c", command)
         if self._is_powershell:
             return (str(self._shell_path), "-command", command)
         return (str(self._shell_path), "-c", command)

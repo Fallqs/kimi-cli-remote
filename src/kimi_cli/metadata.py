@@ -18,6 +18,15 @@ def get_metadata_file() -> Path:
     return get_share_dir() / "kimi.json"
 
 
+class SSHConfig(BaseModel):
+    """SSH configuration for remote KAOS sessions."""
+
+    host: str
+    port: int = 22
+    username: str | None = None
+    key_path: str | None = None
+
+
 class WorkDirMeta(BaseModel):
     """Metadata for a work directory."""
 
@@ -26,6 +35,9 @@ class WorkDirMeta(BaseModel):
 
     kaos: str = local_kaos.name
     """The name of the KAOS where the work directory is located."""
+
+    ssh: SSHConfig | None = None
+    """SSH configuration when kaos is 'ssh'."""
 
     last_session_id: str | None = None
     """Last session ID of this work directory."""
@@ -52,6 +64,13 @@ class Metadata(BaseModel):
         """Get the metadata for a work directory."""
         for wd in self.work_dirs:
             if wd.path == str(path) and wd.kaos == get_current_kaos().name:
+                return wd
+        return None
+
+    def find_work_dir_meta_by_path(self, path: str) -> WorkDirMeta | None:
+        """Find work directory metadata by path across all KAOS backends."""
+        for wd in self.work_dirs:
+            if wd.path == path:
                 return wd
         return None
 

@@ -85,8 +85,10 @@ class BackgroundTaskManager:
             raise RuntimeError("Background tasks are only supported from the root agent.")
 
     def _ensure_local_backend(self) -> None:
-        if self._session.work_dir_meta.kaos != local_kaos.name:
-            raise RuntimeError("Background tasks are only supported on local sessions.")
+        if self._session.work_dir_meta.kaos not in (local_kaos.name, "ssh"):
+            raise RuntimeError(
+                "Background tasks are only supported on local or SSH sessions."
+            )
 
     def _active_task_count(self) -> int:
         return sum(

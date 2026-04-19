@@ -108,11 +108,8 @@ def kimi(
         typer.Option(
             "--work-dir",
             "-w",
-            exists=True,
             file_okay=False,
             dir_okay=True,
-            readable=True,
-            writable=True,
             help="Working directory for the agent. Default: current directory.",
         ),
     ] = None,
@@ -322,6 +319,41 @@ def kimi(
             help="Custom skills directories (repeatable). Overrides default discovery.",
         ),
     ] = None,
+    # Remote execution
+    ssh_host: Annotated[
+        str | None,
+        typer.Option(
+            "--ssh-host",
+            help="SSH host for remote execution. All shell and file operations will run on this host.",
+        ),
+    ] = None,
+    ssh_port: Annotated[
+        int,
+        typer.Option(
+            "--ssh-port",
+            min=1,
+            max=65535,
+            help="SSH port. Default: 22.",
+        ),
+    ] = 22,
+    ssh_user: Annotated[
+        str | None,
+        typer.Option(
+            "--ssh-user",
+            help="SSH username. Default: inferred from SSH config or current user.",
+        ),
+    ] = None,
+    ssh_key: Annotated[
+        Path | None,
+        typer.Option(
+            "--ssh-key",
+            exists=True,
+            file_okay=True,
+            dir_okay=False,
+            readable=True,
+            help="Path to SSH private key for authentication.",
+        ),
+    ] = None,
     # Loop control
     max_steps_per_turn: Annotated[
         int | None,
@@ -365,14 +397,16 @@ def kimi(
 
     del version  # handled in the callback
 
+    from kaos import reset_current_kaos, set_current_kaos
     from kaos.path import KaosPath
+    from kaos.ssh import SSHKaos
 
     from kimi_cli.agentspec import DEFAULT_AGENT_FILE, OKABE_AGENT_FILE
     from kimi_cli.app import KimiCLI, enable_logging
     from kimi_cli.config import Config, load_config_from_string
     from kimi_cli.exception import ConfigError
     from kimi_cli.hooks import events as hook_events
-    from kimi_cli.metadata import load_metadata, save_metadata
+    from kimi_cli.metadata import SSHConfig, load_metadata, save_metadata
     from kimi_cli.session import Session
     from kimi_cli.ui.shell.startup import ShellStartupProgress
     from kimi_cli.utils.logging import logger, open_original_stderr, redirect_stderr_to_logger
@@ -523,7 +557,80 @@ def kimi(
     if local_skills_dir:
         skills_dirs = [KaosPath.unsafe_from_local_path(p) for p in local_skills_dir]
 
+    work_dir_str: str | None = local_work_dir.as_posix() if local_work_dir else None
     work_dir = KaosPath.unsafe_from_local_path(local_work_dir) if local_work_dir else KaosPath.cwd()
+
+    # Manual validation for local work_dir (typer's exists check was removed to support remote paths)
+    if ssh_host is None and local_work_dir is not None:
+        if not local_work_dir.exists():
+            raise typer.BadParameter(
+                f"Working directory does not exist: {local_work_dir}",
+                param_hint="--work-dir",
+            )
+        if not local_work_dir.is_dir():
+            raise typer.BadParameter(
+                f"Working directory is not a directory: {local_work_dir}",
+                param_hint="--work-dir",
+            )
+
+    def _resolve_ssh_host(
+        host: str,
+        port: int,
+        username: str | None,
+        key: Path | None,
+    ) -> tuple[str, int, str | None, list[str] | None]:
+        """Resolve SSH config alias and return (host, port, username, key_contents)."""
+        import re
+
+        ssh_config_path = Path.home() / ".ssh" / "config"
+        resolved_host = host
+        resolved_port = port
+        resolved_user = username
+        key_contents = None
+
+        if ssh_config_path.exists():
+            text = ssh_config_path.read_text(encoding="utf-8")
+            pattern = rf"Host\s+{re.escape(host)}\b(.*?)(?=Host\s|\Z)"
+            match = re.search(pattern, text, re.DOTALL | re.IGNORECASE)
+            if match:
+                block = match.group(1)
+                for line in block.splitlines():
+                    line = line.strip()
+                    if not line or line.startswith("#"):
+                        continue
+                    parts = line.split(None, 1)
+                    if len(parts) != 2:
+                        continue
+                    key_name, val = parts
+                    val = val.strip()
+                    key_lower = key_name.lower()
+                    if key_lower == "hostname":
+                        resolved_host = val
+                    elif key_lower == "port":
+                        try:
+                            resolved_port = int(val)
+                        except ValueError:
+                            pass
+                    elif key_lower == "user":
+                        resolved_user = val
+                    elif key_lower == "identityfile":
+                        if key is None:
+                            key_path = Path(val).expanduser()
+                            try:
+                                key_contents = [key_path.read_text(encoding="utf-8")]
+                            except Exception:
+                                pass
+
+        # CLI flags override config file values
+        if username is not None:
+            resolved_user = username
+        if key is not None:
+            try:
+                key_contents = [key.read_text(encoding="utf-8")]
+            except Exception:
+                pass
+
+        return resolved_host, resolved_port, resolved_user, key_contents
 
     # Tracks the most recently created/loaded session so that _reload_loop's
     # exception handler can clean it up even when _run() fails before returning.
@@ -537,8 +644,51 @@ def kimi(
             The session and the exit code (0 = success, 1 = failure, 75 = retryable).
         """
         startup_progress = ShellStartupProgress(enabled=ui == "shell")
+        ssh_kaos = None
+        kaos_token = None
         try:
             startup_progress.update("Preparing session...")
+
+            # Initialize SSH KAOS if requested or if resuming an SSH session
+            if ssh_host:
+                resolved_host, resolved_port, resolved_user, key_contents = _resolve_ssh_host(
+                    ssh_host, ssh_port, ssh_user, ssh_key
+                )
+                ssh_kaos = await SSHKaos.create(
+                    host=resolved_host,
+                    port=resolved_port,
+                    username=resolved_user,
+                    key_contents=key_contents,
+                )
+                kaos_token = set_current_kaos(ssh_kaos)
+                logger.info("Connected to SSH host: {host}", host=resolved_host)
+            elif session_id is not None or continue_:
+                metadata = load_metadata()
+                wdm = metadata.find_work_dir_meta_by_path(str(work_dir))
+                if wdm is not None and wdm.ssh is not None:
+                    ssh_cfg = wdm.ssh
+                    _, _, _, key_contents = _resolve_ssh_host(
+                        ssh_cfg.host,
+                        ssh_cfg.port,
+                        ssh_cfg.username,
+                        Path(ssh_cfg.key_path) if ssh_cfg.key_path else None,
+                    )
+                    ssh_kaos = await SSHKaos.create(
+                        host=ssh_cfg.host,
+                        port=ssh_cfg.port,
+                        username=ssh_cfg.username,
+                        key_contents=key_contents,
+                    )
+                    kaos_token = set_current_kaos(ssh_kaos)
+                    logger.info(
+                        "Auto-reconnected to SSH host: {host} for resumed session",
+                        host=ssh_cfg.host,
+                    )
+
+            # Re-create work_dir with the correct KAOS backend so remote paths
+            # are not mangled by Windows local path logic.
+            if ssh_kaos is not None:
+                work_dir = KaosPath(work_dir_str) if work_dir_str else kaos.getcwd()
 
             # Track if we're resuming an existing session (vs creating new)
             resumed = False
@@ -572,6 +722,20 @@ def kimi(
 
             nonlocal _latest_created_session
             _latest_created_session = session
+
+            # Persist SSH config to metadata so resumed sessions can auto-reconnect
+            if ssh_kaos is not None and ssh_host is not None:
+                metadata = load_metadata()
+                wdm = metadata.get_work_dir_meta(work_dir)
+                if wdm is None:
+                    wdm = metadata.new_work_dir_meta(work_dir)
+                wdm.ssh = SSHConfig(
+                    host=ssh_host,
+                    port=ssh_port,
+                    username=ssh_user,
+                    key_path=str(ssh_key) if ssh_key else None,
+                )
+                save_metadata(metadata)
 
             # Add CLI-provided additional directories to session state
             if local_add_dirs:
@@ -696,6 +860,10 @@ def kimi(
 
             return session, exit_code
         finally:
+            if kaos_token is not None:
+                reset_current_kaos(kaos_token)
+            if ssh_kaos is not None:
+                await ssh_kaos.unsafe_close()
             startup_progress.stop()
 
     async def _delete_empty_session(session: Session) -> None:
