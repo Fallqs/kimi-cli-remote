@@ -320,7 +320,10 @@ class Runtime:
         if isinstance(get_current_kaos(), SSHKaos):
             from kimi_cli.utils.remote_shell import PersistentRemoteShell
 
-            remote_shell = PersistentRemoteShell(get_current_kaos()._connection)
+            remote_shell = PersistentRemoteShell(
+                get_current_kaos()._connection,
+                cwd=str(session.work_dir),
+            )
             await remote_shell.start()
             logger.info("Persistent remote shell started")
 

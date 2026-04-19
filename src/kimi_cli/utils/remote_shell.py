@@ -20,8 +20,9 @@ if TYPE_CHECKING:
 class PersistentRemoteShell:
     """A persistent interactive bash session on a remote host."""
 
-    def __init__(self, connection: SSHClientConnection) -> None:
+    def __init__(self, connection: SSHClientConnection, cwd: str = "") -> None:
         self._connection = connection
+        self._cwd = cwd
         self._process: SSHClientProcess[bytes] | None = None
 
     async def start(self) -> None:
@@ -33,6 +34,13 @@ class PersistentRemoteShell:
         # Allow bash to start up and then consume any initial prompt / banner.
         await asyncio.sleep(0.3)
         await self._drain_output(timeout=0.3)
+        # Sync working directory so the shell starts in the same location as
+        # the KAOS session work_dir instead of the SSH login home directory.
+        if self._cwd:
+            self._process.stdin.write(f"cd {self._cwd}\n".encode())
+            await self._process.stdin.drain()
+            await asyncio.sleep(0.1)
+            await self._drain_output(timeout=0.2)
 
     async def run(
         self,
