@@ -200,6 +200,9 @@ class Shell:
             **{cmd.name: cmd for cmd in shell_slash_registry.list_commands()},
         }
         """Shell-level slash commands + soul-level slash commands. Name to command mapping."""
+        # Track active conda environment in remote shell mode so that
+        # "conda activate" effects persist across separate command invocations.
+        self._active_conda_env: str | None = None
 
     @property
     def available_slash_commands(self) -> dict[str, SlashCommand[Any]]:
@@ -708,6 +711,18 @@ class Shell:
         """Run a shell command on the remote host via SSH in foreground."""
         import kaos
         import sys
+
+        # Track conda environment so that "conda activate" persists across
+        # separate command invocations (each kaos.exec call starts a fresh bash).
+        stripped = command.strip()
+        if stripped.startswith("conda activate"):
+            parts = stripped.split(None, 2)
+            self._active_conda_env = parts[2] if len(parts) > 2 else "base"
+        elif stripped.startswith("conda deactivate"):
+            self._active_conda_env = None
+
+        if self._active_conda_env is not None and not stripped.startswith("conda activate"):
+            command = f"conda activate {self._active_conda_env} && {command}"
 
         # Use interactive bash so that ~/.bashrc is sourced, making tools
         # like conda available.
